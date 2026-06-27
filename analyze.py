@@ -25,25 +25,25 @@ col_popular_keyword = db["PopularKeyword"]
 col_analytics       = db["analytics_products"]
 col_big_data        = db["Big_Data"]
 
-# ── 1. HITUNG TOP PRODUK DARI search_logs ────────────────────────
-print("📊 Menghitung top produk dari search_logs ...")
+# ── 1. HITUNG TOP PRODUK DARI Big_Data ───────────────────────────
+print("\n📊 Menghitung top produk dari Big_Data ...")
 
-pipeline = [
+pipeline_top = [
     {
         "$group": {
-            "_id": "$namaProduk",
-            "kategori":    {"$first": "$kategori"},
-            "jumlahDicari": {"$sum": 1}
+            "_id":          "$Keyword",
+            "kategori":     {"$first": "$Kategori"},
+            "jumlahDicari": {"$sum": "$Minat_Pencarian"},
         }
     },
-    {"$sort": {"jumlahDicari": DESCENDING}},
-    {"$limit": 10}
+    {"$sort":  {"jumlahDicari": DESCENDING}},
+    {"$limit": 10},
 ]
 
-top_produk = list(col_search_logs.aggregate(pipeline))
+top_produk = list(col_big_data.aggregate(pipeline_top))
 total      = sum(p["jumlahDicari"] for p in top_produk)
 
-print(f"   ✅ Ditemukan {len(top_produk)} produk unik")
+print(f"   ✅ {len(top_produk)} produk unik ditemukan")
 
 # ── 2. HITUNG STATISTIK DARI Big_Data (Google Trends) ────────────
 print("📈 Menghitung statistik Google Trends ...")
