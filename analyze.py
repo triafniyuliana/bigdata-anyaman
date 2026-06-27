@@ -116,21 +116,6 @@ for produk in top_produk:
 
 print(f"   ✅ {len(top_produk)} keyword diperbarui")
 
-keywords = list(col_search_logs.aggregate(keyword_pipeline))
-
-for kw in keywords:
-    col_popular_keyword.update_one(
-        {"keyword": kw["_id"]},
-        {"$set": {
-            "keyword":    kw["_id"],
-            "jumlahCari": kw["jumlahCari"],
-            "updatedAt":  now
-        }},
-        upsert=True
-    )
-
-print(f"   ✅ {len(keywords)} keyword diperbarui")
-
 # ── 5. LAPORAN AKHIR ──────────────────────────────────────────────
 print("\n" + "=" * 50)
 print(f"✅ Analisis selesai: {now.strftime('%Y-%m-%d %H:%M:%S UTC')}")
