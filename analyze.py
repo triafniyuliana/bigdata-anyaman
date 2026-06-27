@@ -13,8 +13,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ── KONEKSI ───────────────────────────────────────────────────────
-MONGO_URI = os.environ["mongodb+srv://admin:admin123@cluster0.6jnhmhp.mongodb.net/"]
-DB_NAME   = os.environ.get("bigdata_db", "anyaman_bambu")
+MONGO_URI = os.environ["MONGODB_URI"]
+DB_NAME   = os.environ.get("DB_NAME", "bigdata_db")
 
 client = MongoClient(MONGO_URI)
 db     = client[DB_NAME]
