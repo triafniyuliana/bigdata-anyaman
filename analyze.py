@@ -100,18 +100,21 @@ if docs:
     col_analytics.insert_many(docs)
     print(f"   ✅ {len(docs)} produk disimpan ke analytics_products")
 
-# ── 4. UPDATE PopularKeyword dari search_logs ─────────────────────
-print("🔑 Sync PopularKeyword ...")
+# ── 4. SYNC PopularKeyword dari Big_Data ─────────────────────────
+print("\n🔑 Sync PopularKeyword ...")
 
-keyword_pipeline = [
-    {
-        "$group": {
-            "_id":          "$keyword",
-            "jumlahCari":   {"$sum": 1},
-            "updatedAt":    {"$max": "$searchedAt"}
-        }
-    }
-]
+for produk in top_produk:
+    col_popular_keyword.update_one(
+        {"keyword": produk["_id"].lower()},
+        {"$set": {
+            "keyword":    produk["_id"].lower(),
+            "jumlahCari": produk["jumlahDicari"],
+            "updatedAt":  now,
+        }},
+        upsert=True,
+    )
+
+print(f"   ✅ {len(top_produk)} keyword diperbarui")
 
 keywords = list(col_search_logs.aggregate(keyword_pipeline))
 
