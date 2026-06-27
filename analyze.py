@@ -14,16 +14,16 @@ load_dotenv()
 
 # ── KONEKSI ───────────────────────────────────────────────────────
 MONGO_URI = os.environ["MONGODB_URI"]
-DB_NAME   = os.environ.get("DB_NAME", "bigdata_db")
+DB_NAME   = os.environ.get("DB_APP", "anyaman")
 
 client = MongoClient(MONGO_URI)
 db     = client[DB_NAME]
 
 # ── COLLECTIONS ───────────────────────────────────────────────────
-col_search_logs       = db["search_logs"]
-col_popular_keyword   = db["PopularKeyword"]
-col_big_data          = db["Big_Data"]
-col_analytics         = db["analytics_products"]
+col_search_logs     = db["search_logs"]
+col_popular_keyword = db["PopularKeyword"]
+col_analytics       = db["analytics_products"]
+col_big_data        = db["Big_Data"]
 
 # ── 1. HITUNG TOP PRODUK DARI search_logs ────────────────────────
 print("📊 Menghitung top produk dari search_logs ...")
