@@ -1,0 +1,31 @@
+name: Big Data — Analisis Harian
+
+on:
+  schedule:
+    # Setiap hari 00.00 WIB = 17.00 UTC
+    - cron: '0 17 * * *'
+
+  # Tombol manual untuk testing
+  workflow_dispatch:
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Jalankan analisis
+        env:
+          MONGODB_URI: ${{ secrets.MONGODB_URI }}
+          DB_NAME: ${{ secrets.DB_NAME }}
+        run: python analyze.py
