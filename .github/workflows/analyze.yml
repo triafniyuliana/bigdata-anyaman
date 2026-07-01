@@ -1,4 +1,4 @@
-name: Big Data Analyze
+name: Big Data Scheduling
 
 on:
   schedule:
