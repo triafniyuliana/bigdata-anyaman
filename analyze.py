@@ -70,7 +70,7 @@ REGION = "ID"
 SOURCE = "Google Trends"
 
 # Karena GitHub Actions jalan setiap 3 jam,
-# data trends diambil dari 4 jam terakhir agar tetap aman.
+# data Google Trends diambil dari 4 jam terakhir agar tidak terlewat.
 TIMEFRAME = "now 4-H"
 
 now = datetime.now(timezone.utc)
@@ -79,6 +79,60 @@ print("=" * 60)
 print("MEMULAI BIG DATA PIPELINE")
 print(f"Waktu: {now.strftime('%Y-%m-%d %H:%M:%S UTC')}")
 print("=" * 60)
+
+
+# =========================
+# FUNCTION: BERSIHKAN DUPLIKASI LAMA
+# =========================
+def clean_duplicate_big_data():
+    print("\nMembersihkan duplikasi lama di Big_Data...")
+
+    pipeline = [
+        {
+            "$group": {
+                "_id": {
+                    "Tanggal": "$Tanggal",
+                    "Keyword": "$Keyword",
+                    "Region": "$Region",
+                },
+                "ids": {"$push": "$_id"},
+                "count": {"$sum": 1},
+            }
+        },
+        {
+            "$match": {
+                "count": {"$gt": 1},
+            }
+        },
+    ]
+
+    duplicates = list(col_big_data.aggregate(pipeline))
+    total_deleted = 0
+
+    for item in duplicates:
+        ids = item["ids"]
+
+        # simpan 1 data pertama, hapus sisanya
+        ids_to_delete = ids[1:]
+
+        if ids_to_delete:
+            result = col_big_data.delete_many(
+                {
+                    "_id": {
+                        "$in": ids_to_delete,
+                    }
+                }
+            )
+
+            total_deleted += result.deleted_count
+
+    print(f"Duplikasi lama dihapus: {total_deleted}")
+
+
+# =========================
+# BERSIHKAN DUPLIKASI LAMA
+# =========================
+clean_duplicate_big_data()
 
 # =========================
 # BUAT INDEX ANTI DUPLIKASI
@@ -201,7 +255,6 @@ pipeline_top_produk = [
 ]
 
 top_produk = list(col_big_data.aggregate(pipeline_top_produk))
-
 total_pencarian = sum(item["jumlahDicari"] for item in top_produk)
 
 analytics_docs = []
