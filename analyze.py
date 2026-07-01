@@ -3,13 +3,14 @@
 analyze.py
 
 Alur:
-Google Trends
+Produk.keywordTrend
+-> Google Trends
 -> Python Script Data Collection
 -> Cleaning + Anti Duplikasi
 -> MongoDB Big_Data
 -> Python Script Data Analytics
 -> MongoDB analytics_products
--> Dashboard Aplikasi
+-> Dashboard / Flutter
 -> GitHub Actions Schedule
 """
 
@@ -33,44 +34,13 @@ DB_NAME = os.environ.get("DB_APP", "anyaman")
 client = MongoClient(MONGO_URI)
 db = client[DB_NAME]
 
+col_produk = db["Produk"]
 col_big_data = db["Big_Data"]
 col_analytics = db["analytics_products"]
 col_popular_keyword = db["PopularKeyword"]
 
-# =========================
-# KONFIGURASI GOOGLE TRENDS
-# =========================
-KEYWORDS = [
-    "bilik bambu",
-    "piring bambu",
-    "keranjang bambu",
-    "tas anyaman bambu",
-    "caping bambu",
-    "kipas sate",
-    "tudung saji bambu",
-    "bakul nasi bambu",
-    "tampah bambu",
-    "ceting bambu",
-]
-
-KATEGORI_MAP = {
-    "bilik bambu": "Dekorasi",
-    "piring bambu": "Perabot Makan",
-    "keranjang bambu": "Wadah & Penyimpanan",
-    "tas anyaman bambu": "Aksesori Fashion",
-    "caping bambu": "Aksesori Kepala",
-    "kipas sate": "Aksesori Pribadi",
-    "tudung saji bambu": "Wadah & Penyimpanan",
-    "bakul nasi bambu": "Perabot Makan",
-    "tampah bambu": "Perabot Dapur",
-    "ceting bambu": "Perabot Dapur",
-}
-
 REGION = "ID"
 SOURCE = "Google Trends"
-
-# Karena GitHub Actions jalan setiap 3 jam,
-# data Google Trends diambil dari 4 jam terakhir agar tidak terlewat.
 TIMEFRAME = "now 4-H"
 
 now = datetime.now(timezone.utc)
@@ -79,6 +49,47 @@ print("=" * 60)
 print("MEMULAI BIG DATA PIPELINE")
 print(f"Waktu: {now.strftime('%Y-%m-%d %H:%M:%S UTC')}")
 print("=" * 60)
+
+
+# =========================
+# AMBIL KEYWORD DARI PRODUK
+# =========================
+produk_list = list(
+    col_produk.find(
+        {
+            "keywordTrend": {
+                "$exists": True,
+                "$ne": "",
+            }
+        },
+        {
+            "_id": 1,
+            "namaProduk": 1,
+            "keywordTrend": 1,
+            "kategori": 1,
+        },
+    )
+)
+
+if not produk_list:
+    print("Tidak ada produk yang memiliki keywordTrend.")
+    client.close()
+    exit()
+
+PRODUK_MAP = {}
+
+for produk in produk_list:
+    keyword = produk.get("keywordTrend", "").lower().strip()
+
+    if keyword:
+        PRODUK_MAP[keyword] = produk
+
+KEYWORDS = list(PRODUK_MAP.keys())
+
+print(f"Total produk dengan keywordTrend: {len(KEYWORDS)}")
+print("Keyword yang akan dianalisis:")
+for keyword in KEYWORDS:
+    print(f"- {keyword}")
 
 
 # =========================
@@ -110,10 +121,7 @@ def clean_duplicate_big_data():
     total_deleted = 0
 
     for item in duplicates:
-        ids = item["ids"]
-
-        # simpan 1 data pertama, hapus sisanya
-        ids_to_delete = ids[1:]
+        ids_to_delete = item["ids"][1:]
 
         if ids_to_delete:
             result = col_big_data.delete_many(
@@ -154,7 +162,12 @@ total_duplicate = 0
 total_error = 0
 
 for i, keyword in enumerate(KEYWORDS, 1):
-    print(f"[{i}/{len(KEYWORDS)}] Mengambil keyword: {keyword}")
+    produk = PRODUK_MAP[keyword]
+
+    print(
+        f"[{i}/{len(KEYWORDS)}] Mengambil keyword: {keyword} "
+        f"untuk produk: {produk.get('namaProduk')}"
+    )
 
     try:
         pytrends.build_payload(
@@ -181,22 +194,22 @@ for i, keyword in enumerate(KEYWORDS, 1):
                 tanggal = tanggal.replace(tzinfo=timezone.utc)
 
             minat = int(row[keyword])
-
-            # CLEANING DATA
             cleaned_keyword = keyword.lower().strip()
-            kategori = KATEGORI_MAP.get(cleaned_keyword, "Lainnya")
 
             document = {
                 "Tanggal": tanggal,
                 "Keyword": cleaned_keyword,
-                "Kategori": kategori,
+                "Kategori": produk.get("kategori", "Lainnya"),
                 "Minat_Pencarian": minat,
                 "Region": REGION,
                 "Sumber": SOURCE,
                 "Waktu_Ambil": now,
+
+                # penghubung ke produk asli
+                "produkId": str(produk["_id"]),
+                "namaProduk": produk.get("namaProduk"),
             }
 
-            # ANTI DUPLIKASI
             result = col_big_data.update_one(
                 {
                     "Tanggal": tanggal,
@@ -227,6 +240,7 @@ print(f"Data baru       : {total_insert}")
 print(f"Data duplikat   : {total_duplicate}")
 print(f"Keyword error   : {total_error}")
 
+
 # =========================
 # DATA ANALYTICS
 # =========================
@@ -236,6 +250,8 @@ pipeline_top_produk = [
     {
         "$group": {
             "_id": "$Keyword",
+            "produkId": {"$first": "$produkId"},
+            "namaProduk": {"$first": "$namaProduk"},
             "kategori": {"$first": "$Kategori"},
             "jumlahDicari": {"$sum": "$Minat_Pencarian"},
             "rataMinat": {"$avg": "$Minat_Pencarian"},
@@ -271,7 +287,9 @@ for index, item in enumerate(top_produk, start=1):
     analytics_docs.append(
         {
             "ranking": index,
-            "namaProduk": item["_id"],
+            "produkId": item.get("produkId"),
+            "namaProduk": item.get("namaProduk") or item["_id"],
+            "keywordTrend": item["_id"],
             "kategori": item.get("kategori", "-"),
             "jumlahDicari": jumlah_dicari,
             "persentase": persentase,
@@ -283,6 +301,7 @@ for index, item in enumerate(top_produk, start=1):
             "sumber": "Google Trends",
         }
     )
+
 
 # =========================
 # SIMPAN KE analytics_products
@@ -297,6 +316,7 @@ if analytics_docs:
 else:
     print("Tidak ada data analytics yang disimpan.")
 
+
 # =========================
 # SYNC KE PopularKeyword
 # =========================
@@ -305,11 +325,13 @@ print("Sinkronisasi PopularKeyword...")
 for item in analytics_docs:
     col_popular_keyword.update_one(
         {
-            "keyword": item["namaProduk"],
+            "keyword": item["keywordTrend"],
         },
         {
             "$set": {
-                "keyword": item["namaProduk"],
+                "keyword": item["keywordTrend"],
+                "produkId": item["produkId"],
+                "namaProduk": item["namaProduk"],
                 "jumlahCari": item["jumlahDicari"],
                 "ranking": item["ranking"],
                 "kategori": item["kategori"],
@@ -318,6 +340,7 @@ for item in analytics_docs:
         },
         upsert=True,
     )
+
 
 # =========================
 # LAPORAN AKHIR
@@ -331,6 +354,7 @@ print("\nTop 3 Produk:")
 for item in analytics_docs[:3]:
     print(
         f"#{item['ranking']} {item['namaProduk']} "
+        f"({item['keywordTrend']}) "
         f"- {item['jumlahDicari']} skor "
         f"({item['persentase']}%)"
     )
