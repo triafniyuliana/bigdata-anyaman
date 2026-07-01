@@ -2,16 +2,17 @@
 """
 analyze.py
 
-Alur:
-Produk.keywordTrend
--> Google Trends
--> Python Script Data Collection
--> Cleaning + Anti Duplikasi
--> MongoDB Big_Data
--> Python Script Data Analytics
--> MongoDB analytics_products
--> Dashboard / Flutter
--> GitHub Actions Schedule
+Alur Big Data:
+1. Ambil produk dari MongoDB
+2. Ambil keywordTrend dari produk
+3. Data Collection dari Google Trends
+4. Cleaning data
+5. Anti duplikasi
+6. Simpan data mentah ke Big_Data
+7. Analisis data
+8. Simpan hasil ke analytics_products
+9. Sync PopularKeyword
+10. Dashboard Admin / Flutter membaca hasil analisis
 """
 
 import os
@@ -25,9 +26,9 @@ from pytrends.request import TrendReq
 
 load_dotenv()
 
-# =========================
-# KONEKSI MONGODB
-# =========================
+# ======================================================
+# 1. KONEKSI MONGODB
+# ======================================================
 MONGO_URI = os.environ["MONGODB_URI"]
 DB_NAME = os.environ.get("DB_APP", "anyaman")
 
@@ -47,13 +48,15 @@ now = datetime.now(timezone.utc)
 
 print("=" * 60)
 print("MEMULAI BIG DATA PIPELINE")
-print(f"Waktu: {now.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+print(f"Waktu mulai: {now.strftime('%Y-%m-%d %H:%M:%S UTC')}")
 print("=" * 60)
 
 
-# =========================
-# AMBIL KEYWORD DARI PRODUK
-# =========================
+# ======================================================
+# 2. AMBIL PRODUK DARI DATABASE
+# ======================================================
+print("\nMengambil data produk dari MongoDB...")
+
 produk_list = list(
     col_produk.find(
         {
@@ -87,14 +90,16 @@ for produk in produk_list:
 KEYWORDS = list(PRODUK_MAP.keys())
 
 print(f"Total produk dengan keywordTrend: {len(KEYWORDS)}")
-print("Keyword yang akan dianalisis:")
+print("Keyword yang akan digunakan untuk Google Trends:")
+
 for keyword in KEYWORDS:
-    print(f"- {keyword}")
+    produk = PRODUK_MAP[keyword]
+    print(f"- {keyword} -> {produk.get('namaProduk')}")
 
 
-# =========================
-# FUNCTION: BERSIHKAN DUPLIKASI LAMA
-# =========================
+# ======================================================
+# 3. PERSIAPAN ANTI DUPLIKASI DATABASE
+# ======================================================
 def clean_duplicate_big_data():
     print("\nMembersihkan duplikasi lama di Big_Data...")
 
@@ -106,13 +111,19 @@ def clean_duplicate_big_data():
                     "Keyword": "$Keyword",
                     "Region": "$Region",
                 },
-                "ids": {"$push": "$_id"},
-                "count": {"$sum": 1},
+                "ids": {
+                    "$push": "$_id",
+                },
+                "count": {
+                    "$sum": 1,
+                },
             }
         },
         {
             "$match": {
-                "count": {"$gt": 1},
+                "count": {
+                    "$gt": 1,
+                },
             }
         },
     ]
@@ -137,28 +148,31 @@ def clean_duplicate_big_data():
     print(f"Duplikasi lama dihapus: {total_deleted}")
 
 
-# =========================
-# BERSIHKAN DUPLIKASI LAMA
-# =========================
 clean_duplicate_big_data()
 
-# =========================
-# BUAT INDEX ANTI DUPLIKASI
-# =========================
 col_big_data.create_index(
-    [("Tanggal", 1), ("Keyword", 1), ("Region", 1)],
+    [
+        ("Tanggal", 1),
+        ("Keyword", 1),
+        ("Region", 1),
+    ],
     unique=True,
 )
 
-# =========================
-# DATA COLLECTION
-# =========================
+print("Index anti duplikasi aktif: Tanggal + Keyword + Region")
+
+
+# ======================================================
+# 4. DATA COLLECTION DARI GOOGLE TRENDS
+# ======================================================
 print("\nMengambil data dari Google Trends...")
 
-pytrends = TrendReq(hl="id-ID", tz=420)
+pytrends = TrendReq(
+    hl="id-ID",
+    tz=420,
+)
 
-total_insert = 0
-total_duplicate = 0
+hasil_collection = []
 total_error = 0
 
 for i, keyword in enumerate(KEYWORDS, 1):
@@ -184,56 +198,97 @@ for i, keyword in enumerate(KEYWORDS, 1):
 
         data = data.reset_index()
 
-        if "isPartial" in data.columns:
-            data = data.drop(columns=["isPartial"])
-
-        for _, row in data.iterrows():
-            tanggal = row["date"].to_pydatetime()
-
-            if tanggal.tzinfo is None:
-                tanggal = tanggal.replace(tzinfo=timezone.utc)
-
-            minat = int(row[keyword])
-            cleaned_keyword = keyword.lower().strip()
-
-            document = {
-                "Tanggal": tanggal,
-                "Keyword": cleaned_keyword,
-                "Kategori": produk.get("kategori", "Lainnya"),
-                "Minat_Pencarian": minat,
-                "Region": REGION,
-                "Sumber": SOURCE,
-                "Waktu_Ambil": now,
-
-                # penghubung ke produk asli
-                "produkId": str(produk["_id"]),
-                "namaProduk": produk.get("namaProduk"),
+        hasil_collection.append(
+            {
+                "keyword": keyword,
+                "produk": produk,
+                "data": data,
             }
+        )
 
-            result = col_big_data.update_one(
-                {
-                    "Tanggal": tanggal,
-                    "Keyword": cleaned_keyword,
-                    "Region": REGION,
-                },
-                {
-                    "$setOnInsert": document,
-                },
-                upsert=True,
-            )
-
-            if result.upserted_id:
-                total_insert += 1
-            else:
-                total_duplicate += 1
+        print(f"Data berhasil diambil: {len(data)} baris")
 
         jeda = random.randint(10, 20)
-        print(f"Berhasil diproses. Jeda {jeda} detik...\n")
+        print(f"Jeda {jeda} detik...\n")
         time.sleep(jeda)
 
     except Exception as e:
         total_error += 1
         print(f"Error pada keyword {keyword}: {e}")
+
+
+# ======================================================
+# 5. CLEANING DATA
+# ======================================================
+print("\nMelakukan cleaning data...")
+
+cleaned_documents = []
+
+for item in hasil_collection:
+    keyword = item["keyword"]
+    produk = item["produk"]
+    data = item["data"]
+
+    if "isPartial" in data.columns:
+        data = data.drop(
+            columns=["isPartial"],
+        )
+
+    for _, row in data.iterrows():
+        tanggal = row["date"].to_pydatetime()
+
+        if tanggal.tzinfo is None:
+            tanggal = tanggal.replace(
+                tzinfo=timezone.utc,
+            )
+
+        cleaned_keyword = keyword.lower().strip()
+        minat = int(row[keyword])
+
+        document = {
+            "Tanggal": tanggal,
+            "Keyword": cleaned_keyword,
+            "Kategori": produk.get("kategori", "Lainnya"),
+            "Minat_Pencarian": minat,
+            "Region": REGION,
+            "Sumber": SOURCE,
+            "Waktu_Ambil": now,
+
+            # Penghubung ke produk asli aplikasi
+            "produkId": str(produk["_id"]),
+            "namaProduk": produk.get("namaProduk"),
+        }
+
+        cleaned_documents.append(document)
+
+print(f"Total data setelah cleaning: {len(cleaned_documents)}")
+
+
+# ======================================================
+# 6. SIMPAN KE Big_Data DENGAN ANTI DUPLIKASI
+# ======================================================
+print("\nMenyimpan data mentah ke Big_Data...")
+
+total_insert = 0
+total_duplicate = 0
+
+for document in cleaned_documents:
+    result = col_big_data.update_one(
+        {
+            "Tanggal": document["Tanggal"],
+            "Keyword": document["Keyword"],
+            "Region": document["Region"],
+        },
+        {
+            "$setOnInsert": document,
+        },
+        upsert=True,
+    )
+
+    if result.upserted_id:
+        total_insert += 1
+    else:
+        total_duplicate += 1
 
 print("\nDATA COLLECTION SELESAI")
 print(f"Data baru       : {total_insert}")
@@ -241,23 +296,39 @@ print(f"Data duplikat   : {total_duplicate}")
 print(f"Keyword error   : {total_error}")
 
 
-# =========================
-# DATA ANALYTICS
-# =========================
-print("\nMenghitung analisis produk...")
+# ======================================================
+# 7. DATA ANALYTICS
+# ======================================================
+print("\nMenghitung analisis produk dari Big_Data...")
 
 pipeline_top_produk = [
     {
         "$group": {
             "_id": "$Keyword",
-            "produkId": {"$first": "$produkId"},
-            "namaProduk": {"$first": "$namaProduk"},
-            "kategori": {"$first": "$Kategori"},
-            "jumlahDicari": {"$sum": "$Minat_Pencarian"},
-            "rataMinat": {"$avg": "$Minat_Pencarian"},
-            "maxMinat": {"$max": "$Minat_Pencarian"},
-            "totalData": {"$sum": 1},
-            "tanggalTerakhir": {"$max": "$Tanggal"},
+            "produkId": {
+                "$first": "$produkId",
+            },
+            "namaProduk": {
+                "$first": "$namaProduk",
+            },
+            "kategori": {
+                "$first": "$Kategori",
+            },
+            "jumlahDicari": {
+                "$sum": "$Minat_Pencarian",
+            },
+            "rataMinat": {
+                "$avg": "$Minat_Pencarian",
+            },
+            "maxMinat": {
+                "$max": "$Minat_Pencarian",
+            },
+            "totalData": {
+                "$sum": 1,
+            },
+            "tanggalTerakhir": {
+                "$max": "$Tanggal",
+            },
         }
     },
     {
@@ -270,8 +341,16 @@ pipeline_top_produk = [
     },
 ]
 
-top_produk = list(col_big_data.aggregate(pipeline_top_produk))
-total_pencarian = sum(item["jumlahDicari"] for item in top_produk)
+top_produk = list(
+    col_big_data.aggregate(
+        pipeline_top_produk,
+    )
+)
+
+total_pencarian = sum(
+    item["jumlahDicari"]
+    for item in top_produk
+)
 
 analytics_docs = []
 
@@ -279,7 +358,10 @@ for index, item in enumerate(top_produk, start=1):
     jumlah_dicari = item["jumlahDicari"]
 
     persentase = (
-        round((jumlah_dicari / total_pencarian) * 100, 1)
+        round(
+            (jumlah_dicari / total_pencarian) * 100,
+            1,
+        )
         if total_pencarian > 0
         else 0
     )
@@ -298,29 +380,36 @@ for index, item in enumerate(top_produk, start=1):
             "totalData": item["totalData"],
             "tanggalTerakhir": item["tanggalTerakhir"],
             "generatedAt": now,
-            "sumber": "Google Trends",
+            "sumber": SOURCE,
         }
     )
 
 
-# =========================
-# SIMPAN KE analytics_products
-# =========================
-print("Menyimpan hasil analisis ke analytics_products...")
+# ======================================================
+# 8. SIMPAN HASIL ANALISIS KE analytics_products
+# ======================================================
+print("\nMenyimpan hasil analisis ke analytics_products...")
 
 col_analytics.delete_many({})
 
 if analytics_docs:
-    col_analytics.insert_many(analytics_docs)
-    print(f"{len(analytics_docs)} data analytics berhasil disimpan.")
+    col_analytics.insert_many(
+        analytics_docs,
+    )
+
+    print(
+        f"{len(analytics_docs)} data analytics berhasil disimpan."
+    )
 else:
-    print("Tidak ada data analytics yang disimpan.")
+    print(
+        "Tidak ada data analytics yang disimpan."
+    )
 
 
-# =========================
-# SYNC KE PopularKeyword
-# =========================
-print("Sinkronisasi PopularKeyword...")
+# ======================================================
+# 9. SYNC KE PopularKeyword
+# ======================================================
+print("\nSinkronisasi PopularKeyword...")
 
 for item in analytics_docs:
     col_popular_keyword.update_one(
@@ -341,10 +430,12 @@ for item in analytics_docs:
         upsert=True,
     )
 
+print(f"{len(analytics_docs)} keyword populer berhasil disinkronkan.")
 
-# =========================
-# LAPORAN AKHIR
-# =========================
+
+# ======================================================
+# 10. LAPORAN AKHIR
+# ======================================================
 print("\n" + "=" * 60)
 print("BIG DATA PIPELINE SELESAI")
 print(f"Waktu selesai: {now.strftime('%Y-%m-%d %H:%M:%S UTC')}")
