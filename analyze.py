@@ -1,173 +1,287 @@
 # -*- coding: utf-8 -*-
 """
 analyze.py
-Mengambil data dari Google Trends (4 jam terakhir) -> Simpan ke Big_Data
-Membaca search_logs dari MongoDB -> Hitung top produk -> Simpan ke analytics_products
+
+Alur:
+Google Trends
+-> Python Script Data Collection
+-> Cleaning + Anti Duplikasi
+-> MongoDB Big_Data
+-> Python Script Data Analytics
+-> MongoDB analytics_products
+-> Dashboard Aplikasi
+-> GitHub Actions Schedule
 """
 
 import os
 import time
 import random
-import pandas as pd
 from datetime import datetime, timezone
-from pymongo import MongoClient, DESCENDING
+
 from dotenv import load_dotenv
+from pymongo import MongoClient, DESCENDING
 from pytrends.request import TrendReq
 
 load_dotenv()
 
-# KONEKSI
+# =========================
+# KONEKSI MONGODB
+# =========================
 MONGO_URI = os.environ["MONGODB_URI"]
-DB_NAME   = os.environ.get("DB_APP", "anyaman")
+DB_NAME = os.environ.get("DB_APP", "anyaman")
 
 client = MongoClient(MONGO_URI)
-db     = client[DB_NAME]
+db = client[DB_NAME]
 
-col_search_logs     = db["search_logs"]
+col_big_data = db["Big_Data"]
+col_analytics = db["analytics_products"]
 col_popular_keyword = db["PopularKeyword"]
-col_analytics       = db["analytics_products"]
-col_big_data        = db["Big_Data"]
 
-# KONFIGURASI PYTRENDS
+# =========================
+# KONFIGURASI GOOGLE TRENDS
+# =========================
 KEYWORDS = [
-    "bilik bambu", "piring bambu", "keranjang bambu", "tas anyaman bambu",
-    "caping bambu", "kipas sate", "tudung saji bambu", "bakul nasi bambu",
-    "tampah bambu", "ceting bambu"
+    "bilik bambu",
+    "piring bambu",
+    "keranjang bambu",
+    "tas anyaman bambu",
+    "caping bambu",
+    "kipas sate",
+    "tudung saji bambu",
+    "bakul nasi bambu",
+    "tampah bambu",
+    "ceting bambu",
 ]
 
 KATEGORI_MAP = {
-    "bilik bambu": "Dekorasi", "piring bambu": "Perabot Makan",
-    "keranjang bambu": "Wadah & Penyimpanan", "tas anyaman bambu": "Aksesori Fashion",
-    "caping bambu": "Aksesori Kepala", "kipas sate": "Aksesori Pribadi",
-    "tudung saji bambu": "Wadah & Penyimpanan", "bakul nasi bambu": "Perabot Makan",
-    "tampah bambu": "Perabot Dapur", "ceting bambu": "Perabot Dapur"
+    "bilik bambu": "Dekorasi",
+    "piring bambu": "Perabot Makan",
+    "keranjang bambu": "Wadah & Penyimpanan",
+    "tas anyaman bambu": "Aksesori Fashion",
+    "caping bambu": "Aksesori Kepala",
+    "kipas sate": "Aksesori Pribadi",
+    "tudung saji bambu": "Wadah & Penyimpanan",
+    "bakul nasi bambu": "Perabot Makan",
+    "tampah bambu": "Perabot Dapur",
+    "ceting bambu": "Perabot Dapur",
 }
 
 REGION = "ID"
 SOURCE = "Google Trends"
+
+# Karena GitHub Actions jalan setiap 3 jam,
+# data trends diambil dari 4 jam terakhir agar tetap aman.
 TIMEFRAME = "now 4-H"
 
-print("Memulai pengambilan data dari Google Trends...")
+now = datetime.now(timezone.utc)
 
-pytrends = TrendReq(hl='id-ID', tz=420)
-hasil_trends = []
+print("=" * 60)
+print("MEMULAI BIG DATA PIPELINE")
+print(f"Waktu: {now.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+print("=" * 60)
+
+# =========================
+# BUAT INDEX ANTI DUPLIKASI
+# =========================
+col_big_data.create_index(
+    [("Tanggal", 1), ("Keyword", 1), ("Region", 1)],
+    unique=True,
+)
+
+# =========================
+# DATA COLLECTION
+# =========================
+print("\nMengambil data dari Google Trends...")
+
+pytrends = TrendReq(hl="id-ID", tz=420)
+
+total_insert = 0
+total_duplicate = 0
+total_error = 0
 
 for i, keyword in enumerate(KEYWORDS, 1):
-    print(f"[{i}/{len(KEYWORDS)}] Mengambil: {keyword} ...")
+    print(f"[{i}/{len(KEYWORDS)}] Mengambil keyword: {keyword}")
+
     try:
-        pytrends.build_payload(kw_list=[keyword], timeframe=TIMEFRAME, geo=REGION)
+        pytrends.build_payload(
+            kw_list=[keyword],
+            timeframe=TIMEFRAME,
+            geo=REGION,
+        )
+
         data = pytrends.interest_over_time()
 
-        if not data.empty:
-            data = data.reset_index()
-            if 'isPartial' in data.columns:
-                data = data.drop(columns=['isPartial'])
+        if data.empty:
+            print(f"Data kosong untuk keyword: {keyword}")
+            continue
 
-            for _, row in data.iterrows():
-                hasil_trends.append({
-                    "Tanggal": row["date"],
-                    "Keyword": keyword,
-                    "Kategori": KATEGORI_MAP.get(keyword, "Lainnya"),
-                    "Minat_Pencarian": int(row[keyword]),
+        data = data.reset_index()
+
+        if "isPartial" in data.columns:
+            data = data.drop(columns=["isPartial"])
+
+        for _, row in data.iterrows():
+            tanggal = row["date"].to_pydatetime()
+
+            if tanggal.tzinfo is None:
+                tanggal = tanggal.replace(tzinfo=timezone.utc)
+
+            minat = int(row[keyword])
+
+            # CLEANING DATA
+            cleaned_keyword = keyword.lower().strip()
+            kategori = KATEGORI_MAP.get(cleaned_keyword, "Lainnya")
+
+            document = {
+                "Tanggal": tanggal,
+                "Keyword": cleaned_keyword,
+                "Kategori": kategori,
+                "Minat_Pencarian": minat,
+                "Region": REGION,
+                "Sumber": SOURCE,
+                "Waktu_Ambil": now,
+            }
+
+            # ANTI DUPLIKASI
+            result = col_big_data.update_one(
+                {
+                    "Tanggal": tanggal,
+                    "Keyword": cleaned_keyword,
                     "Region": REGION,
-                    "Sumber": SOURCE,
-                    "Waktu_Ambil": datetime.now(timezone.utc)
-                })
+                },
+                {
+                    "$setOnInsert": document,
+                },
+                upsert=True,
+            )
+
+            if result.upserted_id:
+                total_insert += 1
+            else:
+                total_duplicate += 1
+
+        jeda = random.randint(10, 20)
+        print(f"Berhasil diproses. Jeda {jeda} detik...\n")
+        time.sleep(jeda)
+
     except Exception as e:
+        total_error += 1
         print(f"Error pada keyword {keyword}: {e}")
 
-    time.sleep(random.randint(10, 20))
+print("\nDATA COLLECTION SELESAI")
+print(f"Data baru       : {total_insert}")
+print(f"Data duplikat   : {total_duplicate}")
+print(f"Keyword error   : {total_error}")
 
-# SIMPAN DATA TRENDS KE MONGODB
-if hasil_trends:
-    col_big_data.insert_many(hasil_trends)
-    print(f"Berhasil menyimpan {len(hasil_trends)} baris data Trends ke Big_Data")
-else:
-    print("Tidak ada data Trends baru yang disimpan.")
+# =========================
+# DATA ANALYTICS
+# =========================
+print("\nMenghitung analisis produk...")
 
-# HITUNG TOP PRODUK DARI Big_Data
-print("\nMenghitung top produk dari Big_Data ...")
-pipeline_top = [
+pipeline_top_produk = [
     {
         "$group": {
             "_id": "$Keyword",
             "kategori": {"$first": "$Kategori"},
             "jumlahDicari": {"$sum": "$Minat_Pencarian"},
-        }
-    },
-    {"$sort": {"jumlahDicari": DESCENDING}},
-    {"$limit": 10},
-]
-
-top_produk = list(col_big_data.aggregate(pipeline_top))
-total = sum(p["jumlahDicari"] for p in top_produk)
-print(f"{len(top_produk)} produk unik ditemukan")
-
-# HITUNG STATISTIK DARI Big_Data
-print("Menghitung statistik Google Trends ...")
-trends_pipeline = [
-    {
-        "$group": {
-            "_id": "$Keyword",
-            "kategori": {"$first": "$Kategori"},
             "rataMinat": {"$avg": "$Minat_Pencarian"},
             "maxMinat": {"$max": "$Minat_Pencarian"},
-            "totalData": {"$sum": 1}
+            "totalData": {"$sum": 1},
+            "tanggalTerakhir": {"$max": "$Tanggal"},
         }
     },
-    {"$sort": {"rataMinat": DESCENDING}}
+    {
+        "$sort": {
+            "jumlahDicari": DESCENDING,
+        }
+    },
+    {
+        "$limit": 10,
+    },
 ]
 
-trends_stats = list(col_big_data.aggregate(trends_pipeline))
-print(f"{len(trends_stats)} keyword Google Trends diproses")
+top_produk = list(col_big_data.aggregate(pipeline_top_produk))
 
+total_pencarian = sum(item["jumlahDicari"] for item in top_produk)
+
+analytics_docs = []
+
+for index, item in enumerate(top_produk, start=1):
+    jumlah_dicari = item["jumlahDicari"]
+
+    persentase = (
+        round((jumlah_dicari / total_pencarian) * 100, 1)
+        if total_pencarian > 0
+        else 0
+    )
+
+    analytics_docs.append(
+        {
+            "ranking": index,
+            "namaProduk": item["_id"],
+            "kategori": item.get("kategori", "-"),
+            "jumlahDicari": jumlah_dicari,
+            "persentase": persentase,
+            "rataMinatTrends": round(item["rataMinat"], 1),
+            "maxMinatTrends": item["maxMinat"],
+            "totalData": item["totalData"],
+            "tanggalTerakhir": item["tanggalTerakhir"],
+            "generatedAt": now,
+            "sumber": "Google Trends",
+        }
+    )
+
+# =========================
 # SIMPAN KE analytics_products
-print("Menyimpan hasil ke analytics_products ...")
-now = datetime.now(timezone.utc)
+# =========================
+print("Menyimpan hasil analisis ke analytics_products...")
+
 col_analytics.delete_many({})
 
-docs = []
-for i, produk in enumerate(top_produk):
-    trend_match = next(
-        (t for t in trends_stats if produk["_id"].lower() in t["_id"].lower()), None
-    )
+if analytics_docs:
+    col_analytics.insert_many(analytics_docs)
+    print(f"{len(analytics_docs)} data analytics berhasil disimpan.")
+else:
+    print("Tidak ada data analytics yang disimpan.")
 
-    docs.append({
-        "ranking": i + 1,
-        "namaProduk": produk["_id"],
-        "kategori": produk.get("kategori", "-"),
-        "jumlahDicari": produk["jumlahDicari"],
-        "persentase": round((produk["jumlahDicari"] / total * 100), 1) if total > 0 else 0,
-        "rataMinatTrends": round(trend_match["rataMinat"], 1) if trend_match else None,
-        "maxMinatTrends": trend_match["maxMinat"] if trend_match else None,
-        "generatedAt": now,
-        "sumber": "Google Trends Terpusat"
-    })
+# =========================
+# SYNC KE PopularKeyword
+# =========================
+print("Sinkronisasi PopularKeyword...")
 
-if docs:
-    col_analytics.insert_many(docs)
-    print(f"{len(docs)} produk disimpan ke analytics_products")
-
-# SYNC PopularKeyword dari Big_Data
-print("\nSync PopularKeyword ...")
-for produk in top_produk:
+for item in analytics_docs:
     col_popular_keyword.update_one(
-        {"keyword": produk["_id"].lower()},
-        {"$set": {
-            "keyword": produk["_id"].lower(),
-            "jumlahCari": produk["jumlahDicari"],
-            "updatedAt": now,
-        }},
+        {
+            "keyword": item["namaProduk"],
+        },
+        {
+            "$set": {
+                "keyword": item["namaProduk"],
+                "jumlahCari": item["jumlahDicari"],
+                "ranking": item["ranking"],
+                "kategori": item["kategori"],
+                "updatedAt": now,
+            }
+        },
         upsert=True,
     )
-print(f"{len(top_produk)} keyword diperbarui")
 
+# =========================
 # LAPORAN AKHIR
-print("\n" + "=" * 50)
-print(f"Analisis selesai: {now.strftime('%Y-%m-%d %H:%M:%S UTC')}")
-print("Top 3 produk:")
-for doc in docs[:3]:
-    print(f" #{doc['ranking']} {doc['namaProduk']} - {doc['jumlahDicari']}x dicari ({doc['persentase']}%)")
-print("=" * 50)
+# =========================
+print("\n" + "=" * 60)
+print("BIG DATA PIPELINE SELESAI")
+print(f"Waktu selesai: {now.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+print("=" * 60)
+
+print("\nTop 3 Produk:")
+for item in analytics_docs[:3]:
+    print(
+        f"#{item['ranking']} {item['namaProduk']} "
+        f"- {item['jumlahDicari']} skor "
+        f"({item['persentase']}%)"
+    )
+
+print("=" * 60)
 
 client.close()
